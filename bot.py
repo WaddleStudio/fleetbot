@@ -17,9 +17,12 @@ import discord
 from discord import app_commands
 from datetime import datetime, timedelta, timezone
 from notion_client import Client as NotionClient
-from dotenv import load_dotenv
 
-load_dotenv()
+# Only load .env file if it exists (local dev). Railway uses system env vars.
+from pathlib import Path
+if Path(".env").exists():
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
 
 # ── Config ──────────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -27,9 +30,15 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DB_ID = os.getenv("NOTION_DB_ID")
 GUILD_ID = os.getenv("GUILD_ID")  # Your Discord server ID (for instant slash command sync)
 
-assert DISCORD_TOKEN, "Missing DISCORD_TOKEN (.env or environment variable)"
-assert NOTION_TOKEN, "Missing NOTION_TOKEN (.env or environment variable)"
-assert NOTION_DB_ID, "Missing NOTION_DB_ID (.env or environment variable)"
+# Debug: show which vars are loaded (no values, just presence)
+print(f"ENV check: DISCORD_TOKEN={'✅' if DISCORD_TOKEN else '❌'} "
+      f"NOTION_TOKEN={'✅' if NOTION_TOKEN else '❌'} "
+      f"NOTION_DB_ID={'✅' if NOTION_DB_ID else '❌'} "
+      f"GUILD_ID={'✅' if GUILD_ID else '❌'}")
+
+assert DISCORD_TOKEN, "Missing DISCORD_TOKEN — set in Railway Variables or .env"
+assert NOTION_TOKEN, "Missing NOTION_TOKEN — set in Railway Variables or .env"
+assert NOTION_DB_ID, "Missing NOTION_DB_ID — set in Railway Variables or .env"
 
 # ── Clients ─────────────────────────────────────────────────
 intents = discord.Intents.default()
