@@ -27,9 +27,9 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DB_ID = os.getenv("NOTION_DB_ID")
 GUILD_ID = os.getenv("GUILD_ID")  # Your Discord server ID (for instant slash command sync)
 
-assert DISCORD_TOKEN, "Missing DISCORD_TOKEN in .env"
-assert NOTION_TOKEN, "Missing NOTION_TOKEN in .env"
-assert NOTION_DB_ID, "Missing NOTION_DB_ID in .env"
+assert DISCORD_TOKEN, "Missing DISCORD_TOKEN (.env or environment variable)"
+assert NOTION_TOKEN, "Missing NOTION_TOKEN (.env or environment variable)"
+assert NOTION_DB_ID, "Missing NOTION_DB_ID (.env or environment variable)"
 
 # ── Clients ─────────────────────────────────────────────────
 intents = discord.Intents.default()
