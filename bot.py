@@ -486,6 +486,8 @@ async def fetch_trendshift() -> list[dict]:
             headers={"User-Agent": "FleetBot/1.0 (TechTrend scan)"},
         )
         resp.raise_for_status()
+        print(f"[trend-scan] HTML length: {len(html)}")
+        print(f"[trend-scan] 'initialData' in html: {'initialData' in html}")
 
     html = resp.text
 
