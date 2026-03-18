@@ -1,22 +1,26 @@
 """
-TechTrend NB Source Bot — Phase 0
-Discord slash commands for tracking NotebookLM source additions.
-Writes to Notion DB, syncs with fleet-command repo on weekly basis.
+FleetBot — TechTrend NB Source Bot + Trend Scanner
+Discord slash commands for tracking NotebookLM source additions
+and daily GitHub trending analysis.
 
 Commands:
-  /nb-add     — Record a new URL to add to NotebookLM
-  /nb-list    — List pending sources (this week or all)
-  /nb-done    — Mark a source as added to NB
+  /nb-add         — Record a new URL to add to NotebookLM
+  /nb-list        — List pending sources (this week or all)
+  /nb-done        — Mark a source as added to NB
   /nb-weekly-sync — Export this week's additions as markdown
-  /nb-stats   — Show source counts per notebook
+  /nb-stats       — Show source counts per notebook
+  /trend-scan     — Scan today's GitHub trending repos for project relevance
 """
 
 import os
 import re
+import json
 import discord
 from discord import app_commands
-from datetime import datetime, timedelta, timezone
+from discord.ext import tasks
+from datetime import datetime, timedelta, timezone, time as dt_time
 from notion_client import Client as NotionClient
+import httpx
 
 # Only load .env file if it exists (local dev). Railway uses system env vars.
 from pathlib import Path
@@ -28,13 +32,15 @@ if Path(".env").exists():
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DB_ID = os.getenv("NOTION_DB_ID")
-GUILD_ID = os.getenv("GUILD_ID")  # Your Discord server ID (for instant slash command sync)
+GUILD_ID = os.getenv("GUILD_ID")
+TECHTREND_CHANNEL_ID = os.getenv("TECHTREND_CHANNEL_ID")
 
 # Debug: show which vars are loaded (no values, just presence)
 print(f"ENV check: DISCORD_TOKEN={'✅' if DISCORD_TOKEN else '❌'} "
       f"NOTION_TOKEN={'✅' if NOTION_TOKEN else '❌'} "
       f"NOTION_DB_ID={'✅' if NOTION_DB_ID else '❌'} "
-      f"GUILD_ID={'✅' if GUILD_ID else '❌'}")
+      f"GUILD_ID={'✅' if GUILD_ID else '❌'} "
+      f"TECHTREND_CHANNEL_ID={'✅' if TECHTREND_CHANNEL_ID else '❌'}")
 
 assert DISCORD_TOKEN, "Missing DISCORD_TOKEN — set in Railway Variables or .env"
 assert NOTION_TOKEN, "Missing NOTION_TOKEN — set in Railway Variables or .env"
@@ -160,7 +166,7 @@ def _get_rich_text(prop: dict) -> str:
     return texts[0]["text"]["content"] if texts else ""
 
 
-# ── Slash Commands ───────────────────────────────────────────
+# ── NB Slash Commands ────────────────────────────────────────
 
 # /nb-add
 @tree.command(name="nb-add", description="記錄一個待新增到 NotebookLM 的來源 URL")
@@ -260,7 +266,6 @@ async def nb_list(
         )
 
     msg = f"**{title}**\n\n" + "\n\n".join(lines) + f"\n\n共 {len(sources)} 筆"
-    # Discord message limit = 2000 chars
     if len(msg) > 1900:
         msg = msg[:1900] + "\n\n⚠️ 清單過長，請用 `/nb-weekly-sync` 匯出完整版"
 
@@ -273,7 +278,6 @@ async def nb_list(
 async def nb_done(interaction: discord.Interaction, source_id: str):
     await interaction.response.defer()
 
-    # Find the page by short ID prefix
     sources = notion_query_sources("pending")
     target = None
     for page in sources:
@@ -309,20 +313,18 @@ async def nb_weekly_sync(interaction: discord.Interaction):
         await interaction.followup.send("本周沒有待新增的來源。")
         return
 
-    # Group by NB
     grouped: dict[str, list] = {"NB1": [], "NB2": [], "NB3": [], "NB4": []}
     for page in sources:
         info = extract_source_info(page)
         grouped.setdefault(info["nb"], []).append(info)
 
-    # Build markdown
     lines = [
         f"# NotebookLM 來源更新 — Week of {format_date_iso(week_start())}",
         f"Generated: {now_tw().strftime('%Y-%m-%d %H:%M')} UTC+8",
         "",
     ]
 
-    url_blocks: dict[str, list[str]] = {}  # For URL-only appendix
+    url_blocks: dict[str, list[str]] = {}
 
     for nb in ["NB1", "NB2", "NB3", "NB4"]:
         items = grouped.get(nb, [])
@@ -339,7 +341,6 @@ async def nb_weekly_sync(interaction: discord.Interaction):
             url_blocks[nb].append(item["url"])
         lines.append("")
 
-    # URL-only section for easy copy-paste into txt files
     lines.append("---")
     lines.append("## 純 URL（直接貼入對應 txt 文件）")
     lines.append("")
@@ -354,7 +355,6 @@ async def nb_weekly_sync(interaction: discord.Interaction):
         lines.append("```")
         lines.append("")
 
-    # Checklist
     lines.append("---")
     lines.append("## 同步 Checklist")
     lines.append("- [ ] 加入 NotebookLM 對應 notebook")
@@ -364,7 +364,6 @@ async def nb_weekly_sync(interaction: discord.Interaction):
 
     md_content = "\n".join(lines)
 
-    # Send as file attachment if too long, otherwise inline
     if len(md_content) > 1800:
         filename = f"nb-sync-{format_date_iso(now_tw())}.md"
         file = discord.File(
@@ -386,7 +385,6 @@ async def nb_stats(interaction: discord.Interaction):
     pending = notion_query_sources("pending")
     done_this_week = notion_query_sources("done", since=week_start())
 
-    # Count by NB
     pending_by_nb: dict[str, int] = {}
     for page in pending:
         nb = page["properties"].get("Notebook", {}).get("select", {}).get("name", "?")
@@ -418,6 +416,299 @@ async def nb_stats(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
+# ── Trend Scan: Config ──────────────────────────────────────
+
+# Layer 1: 專案直接相關 (high priority)
+PROJECT_KEYWORDS: dict[str, list[str]] = {
+    "CardSense": [
+        "credit card", "payment", "fintech", "bank api", "stripe",
+        "financial", "rewards", "cashback", "promo", "billing",
+    ],
+    "RTA": [
+        "review", "trust", "credibility", "fine-tuning", "fine-tune",
+        "embedding", "google maps", "sentiment", "fake review",
+        "annotation", "knowledge distillation", "sft", "rlhf", "dpo",
+    ],
+    "SEEDCRAFT": [
+        "line bot", "line sdk", "education", "parenting", "chatbot",
+        "coaching", "children", "family", "edtech",
+    ],
+    "TechTrend": [
+        "rss", "newsletter", "content pipeline", "briefing",
+        "curation", "news aggregat", "tech digest",
+    ],
+    "Knoty": [
+        "social graph", "relationship", "notification listener",
+        "contact", "social network analysis",
+    ],
+    "Agent/Infra": [
+        "mcp", "agent", "orchestration", "skills", "claude code",
+        "agentic", "multi-agent", "tool use", "function calling",
+        "security hardening", "prompt injection",
+    ],
+}
+
+# Layer 2: 技術棧相關 (medium priority)
+TECH_KEYWORDS: list[str] = [
+    "typescript", "fastapi", "supabase", "railway", "vercel",
+    "ollama", "qwen", "react native", "discord bot", "discord.js",
+    "cloudflare workers", "n8n", "notion api", "spring boot",
+    "postgresql", "docker", "next.js", "nextjs", "tailwind",
+    "shadcn", "unsloth", "lora", "qlora", "vllm",
+]
+
+# 噪音過濾
+EXCLUDE_PATTERNS: list[str] = [
+    r"awesome-",
+    r"free-programming-books",
+    r"coding-interview",
+    r"build-your-own",
+    r"system-design-primer",
+    r"project-based-learning",
+    r"public-apis/public-apis",
+    r"TheAlgorithms/",
+    r"freeCodeCamp/freeCodeCamp",
+]
+
+
+# ── Trend Scan: Fetch ───────────────────────────────────────
+async def fetch_trendshift() -> list[dict]:
+    """Fetch trendshift.io and extract repo data from RSC initialData payload.
+
+    Trendshift uses React Server Components. The repo data is embedded as
+    a JSON array in a self.__next_f.push script with key "initialData".
+    Each repo: full_name, repository_stars, repository_forks,
+    repository_language, repository_description, rank, score.
+    """
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+        resp = await client.get(
+            "https://trendshift.io/",
+            headers={"User-Agent": "FleetBot/1.0 (TechTrend scan)"},
+        )
+        resp.raise_for_status()
+
+    html = resp.text
+
+    match = re.search(
+        r'"initialData":\s*(\[\{.*?\}\])\s*\}',
+        html,
+        re.DOTALL,
+    )
+
+    if not match:
+        print("[trend-scan] Could not find initialData in page — structure may have changed")
+        return []
+
+    try:
+        repos_raw = json.loads(match.group(1))
+    except json.JSONDecodeError as e:
+        print(f"[trend-scan] JSON parse failed: {e}")
+        return []
+
+    repos = []
+    for r in repos_raw:
+        stars = r.get("repository_stars", 0)
+        forks = r.get("repository_forks", 0)
+        name = r.get("full_name", "")
+        repos.append({
+            "rank": r.get("rank", 0),
+            "name": name,
+            "language": r.get("repository_language", ""),
+            "stars": _format_count(stars),
+            "stars_raw": stars,
+            "forks": _format_count(forks),
+            "description": r.get("repository_description", "") or "",
+            "score": r.get("score", 0),
+            "github_url": f"https://github.com/{name}",
+            "trendshift_url": f"https://trendshift.io/repositories/{r.get('repository_id', '')}",
+        })
+
+    return repos
+
+
+def _format_count(n: int | float | str) -> str:
+    if isinstance(n, str):
+        return n
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
+# ── Trend Scan: Match ───────────────────────────────────────
+def _should_exclude(repo: dict) -> bool:
+    text = f"{repo['name']} {repo['description']}"
+    return any(re.search(p, text, re.IGNORECASE) for p in EXCLUDE_PATTERNS)
+
+
+def _match_repo(repo: dict) -> dict | None:
+    search_text = f"{repo['name']} {repo['description']} {repo['language']}".lower()
+
+    matched_projects: list[str] = []
+    for project, keywords in PROJECT_KEYWORDS.items():
+        if any(kw in search_text for kw in keywords):
+            matched_projects.append(project)
+
+    matched_tech = [kw for kw in TECH_KEYWORDS if kw in search_text]
+
+    if not matched_projects and not matched_tech:
+        return None
+
+    return {
+        "repo": repo,
+        "matched_projects": matched_projects,
+        "matched_tech": matched_tech,
+        "priority": "high" if matched_projects else "medium",
+    }
+
+
+# ── Trend Scan: Format ──────────────────────────────────────
+def _build_trend_embed(match: dict) -> discord.Embed:
+    repo = match["repo"]
+    emoji = "🔴" if match["priority"] == "high" else "🟡"
+    color = 0xFF4444 if match["priority"] == "high" else 0xFFAA00
+
+    tags = " ".join(
+        [f"`{p}`" for p in match["matched_projects"]]
+        + [f"`{t}`" for t in match["matched_tech"]]
+    )
+
+    embed = discord.Embed(
+        title=f"{emoji} {repo['name']}",
+        url=repo["github_url"],
+        description=repo["description"][:200] if repo["description"] else "_(no description)_",
+        color=color,
+    )
+    embed.add_field(name="Stars", value=repo["stars"], inline=True)
+    if repo["language"]:
+        embed.add_field(name="Language", value=repo["language"], inline=True)
+    embed.add_field(name="Rank", value=f"#{repo['rank']}", inline=True)
+    embed.add_field(name="匹配", value=tags, inline=False)
+    embed.set_footer(text=f"Trendshift Daily | {format_date_iso(now_tw())}")
+    return embed
+
+
+async def _run_trend_scan(keyword_filter: str | None = None) -> list[dict]:
+    try:
+        repos = await fetch_trendshift()
+        if not repos:
+            print("[trend-scan] No repos parsed")
+            return []
+
+        results = []
+        for repo in repos:
+            if _should_exclude(repo):
+                continue
+            m = _match_repo(repo)
+            if m is None:
+                continue
+            if keyword_filter:
+                kw = keyword_filter.lower()
+                all_text = (
+                    f"{repo['name']} {repo['description']} "
+                    f"{' '.join(m['matched_projects'])} {' '.join(m['matched_tech'])}"
+                ).lower()
+                if kw not in all_text:
+                    continue
+            results.append(m)
+
+        results.sort(key=lambda m: (0 if m["priority"] == "high" else 1, m["repo"]["rank"]))
+        return results
+
+    except Exception as e:
+        print(f"[trend-scan] Error: {e}")
+        return []
+
+
+# ── Trend Scan: Slash Command ───────────────────────────────
+@tree.command(name="trend-scan", description="掃描今日 GitHub trending，推送與專案相關的 repo")
+@app_commands.describe(
+    keyword="額外過濾關鍵字 (e.g. 'agent', 'fine-tuning')",
+    show_all="顯示所有 trending repo（不過濾）",
+)
+async def trend_scan(
+    interaction: discord.Interaction,
+    keyword: str | None = None,
+    show_all: bool = False,
+):
+    await interaction.response.defer()
+
+    if show_all:
+        try:
+            repos = await fetch_trendshift()
+            if not repos:
+                await interaction.followup.send("❌ 無法取得 Trendshift 資料")
+                return
+            lines = []
+            for repo in repos[:25]:
+                lines.append(
+                    f"**#{repo['rank']}** [{repo['name']}]({repo['github_url']}) "
+                    f"⭐{repo['stars']} | {repo['language'] or '?'}"
+                )
+            msg = f"📋 **Trendshift 今日 Top {len(repos)}**\n\n" + "\n".join(lines)
+            if len(msg) > 1900:
+                msg = msg[:1900] + "\n..."
+            await interaction.followup.send(msg)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 取得失敗：```{e}```")
+        return
+
+    results = await _run_trend_scan(keyword_filter=keyword)
+
+    if not results:
+        filter_note = f"（關鍵字: `{keyword}`）" if keyword else ""
+        await interaction.followup.send(
+            f"📡 今日掃描完成 — 無相關 repo{filter_note}\n"
+            f"_(使用 `/trend-scan show_all:True` 查看完整清單)_"
+        )
+        return
+
+    high = [r for r in results if r["priority"] == "high"]
+    medium = [r for r in results if r["priority"] == "medium"]
+
+    filter_note = f" | 關鍵字: `{keyword}`" if keyword else ""
+    await interaction.followup.send(
+        f"📡 **今日趨勢掃描完成** — "
+        f"{len(high)} 個🔴高相關 + {len(medium)} 個🟡技術棧相關{filter_note}"
+    )
+
+    for m in results[:10]:
+        embed = _build_trend_embed(m)
+        await interaction.channel.send(embed=embed)
+
+
+# ── Trend Scan: Daily Cron ──────────────────────────────────
+@tasks.loop(time=dt_time(hour=0, minute=0))  # 00:00 UTC = 08:00 UTC+8
+async def daily_trend_scan():
+    if not TECHTREND_CHANNEL_ID:
+        return
+
+    channel = bot.get_channel(int(TECHTREND_CHANNEL_ID))
+    if not channel:
+        print(f"[trend-scan] Channel {TECHTREND_CHANNEL_ID} not found")
+        return
+
+    results = await _run_trend_scan()
+    if not results:
+        return  # 無匹配 → 靜默
+
+    high = [r for r in results if r["priority"] == "high"]
+    medium = [r for r in results if r["priority"] == "medium"]
+
+    await channel.send(
+        f"📡 **每日趨勢掃描** ({format_date_iso(now_tw())}) — "
+        f"{len(high)} 個🔴高相關 + {len(medium)} 個🟡技術棧相關"
+    )
+
+    for m in results[:10]:
+        embed = _build_trend_embed(m)
+        await channel.send(embed=embed)
+
+
+@daily_trend_scan.before_loop
+async def before_daily_scan():
+    await bot.wait_until_ready()
+
+
 # ── Bot Events ───────────────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -432,7 +723,11 @@ async def on_ready():
         await tree.sync()
         print("✅ Slash commands synced globally (may take up to 1 hour)")
 
-    print("Commands: /nb-add, /nb-list, /nb-done, /nb-weekly-sync, /nb-stats")
+    if TECHTREND_CHANNEL_ID:
+        daily_trend_scan.start()
+        print(f"✅ Daily trend scan → channel {TECHTREND_CHANNEL_ID}")
+
+    print("Commands: /nb-add, /nb-list, /nb-done, /nb-weekly-sync, /nb-stats, /trend-scan")
 
 
 # ── Entry Point ──────────────────────────────────────────────

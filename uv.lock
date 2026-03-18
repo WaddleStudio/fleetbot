@@ -219,6 +219,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "discord-py" },
+    { name = "httpx" },
     { name = "notion-client" },
     { name = "python-dotenv" },
 ]
@@ -231,6 +232,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "discord-py", specifier = ">=2.3.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "notion-client", specifier = ">=2.2.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
 ]
