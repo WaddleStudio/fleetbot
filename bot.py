@@ -618,16 +618,17 @@ async def trend_scan(
             if not repos:
                 await interaction.followup.send("❌ 無法取得 Trendshift 資料")
                 return
-            lines = []
-            for repo in repos[:25]:
-                lines.append(
-                    f"**#{repo['rank']}** [{repo['name']}]({repo['github_url']}) "
-                    f"⭐{repo['stars']} | {repo['language'] or '?'}"
-                )
-            msg = f"📋 **Trendshift 今日 Top {len(repos)}**\n\n" + "\n".join(lines)
-            if len(msg) > 1900:
-                msg = msg[:1900] + "\n..."
-            await interaction.followup.send(msg)
+            await interaction.followup.send(f"📋 **Trendshift 今日 Top {len(repos)}**")
+
+            batch_size = 10
+            for i in range(0, min(len(repos), 25), batch_size):
+                batch = repos[i:i + batch_size]
+                lines = [
+                    f"**#{r['rank']}** [{r['name']}]({r['github_url']}) "
+                    f"⭐{r['stars']} | {r['language'] or '?'}"
+                    for r in batch
+                ]
+                await interaction.channel.send("\n".join(lines))
         except Exception as e:
             import traceback
             traceback.print_exc()
