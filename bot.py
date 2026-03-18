@@ -484,27 +484,24 @@ async def fetch_trendshift() -> list[dict]:
     print(f"[trend-scan] HTML length: {len(html)}")
     print(f"[trend-scan] 'initialData' in html: {'initialData' in html}")
 
+    # RSC payload 是雙重轉義的 JSON: \\" 而非 "
     match = re.search(
-        r'"initialData":\s*(\[\{.*?\}\])\s*\}',
+        r'\\"initialData\\":\s*(\[.*?\])\s*\}',
         html,
         re.DOTALL,
     )
 
     if not match:
-        # 試轉義版本 (RSC payload 裡 JSON key 可能是 \"initialData\")
-        match = re.search(
-            r'\\?"initialData\\?":\s*(\[\{.*?\}\])',
-            html,
-            re.DOTALL,
-        )
+        print("[trend-scan] Could not find initialData")
+        return []
 
-    if not match:
-        print("[trend-scan] Could not find initialData — dumping 500 chars around keyword")
-        idx = html.find("initialData")
-        if idx >= 0:
-            print(f"[trend-scan] context: {repr(html[max(0,idx-50):idx+300])}")
-        else:
-            print("[trend-scan] 'initialData' not found in HTML at all")
+    try:
+        raw = match.group(1)
+        # 反轉義: \\" → " , \\\\ → \\
+        raw = raw.replace('\\"', '"').replace('\\\\', '\\')
+        repos_raw = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[trend-scan] JSON parse failed: {e}")
         return []
 
     try:
