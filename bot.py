@@ -473,23 +473,16 @@ EXCLUDE_PATTERNS: list[str] = [
 
 # ── Trend Scan: Fetch ───────────────────────────────────────
 async def fetch_trendshift() -> list[dict]:
-    """Fetch trendshift.io and extract repo data from RSC initialData payload.
-
-    Trendshift uses React Server Components. The repo data is embedded as
-    a JSON array in a self.__next_f.push script with key "initialData".
-    Each repo: full_name, repository_stars, repository_forks,
-    repository_language, repository_description, rank, score.
-    """
     async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
         resp = await client.get(
             "https://trendshift.io/",
             headers={"User-Agent": "FleetBot/1.0 (TechTrend scan)"},
         )
         resp.raise_for_status()
-        print(f"[trend-scan] HTML length: {len(html)}")
-        print(f"[trend-scan] 'initialData' in html: {'initialData' in html}")
+        html = resp.text
 
-    html = resp.text
+    print(f"[trend-scan] HTML length: {len(html)}")
+    print(f"[trend-scan] 'initialData' in html: {'initialData' in html}")
 
     match = re.search(
         r'"initialData":\s*(\[\{.*?\}\])\s*\}',
@@ -498,13 +491,31 @@ async def fetch_trendshift() -> list[dict]:
     )
 
     if not match:
-        print("[trend-scan] Could not find initialData in page — structure may have changed")
+        # 試轉義版本 (RSC payload 裡 JSON key 可能是 \"initialData\")
+        match = re.search(
+            r'\\?"initialData\\?":\s*(\[\{.*?\}\])',
+            html,
+            re.DOTALL,
+        )
+
+    if not match:
+        print("[trend-scan] Could not find initialData — dumping 500 chars around keyword")
+        idx = html.find("initialData")
+        if idx >= 0:
+            print(f"[trend-scan] context: {repr(html[max(0,idx-50):idx+300])}")
+        else:
+            print("[trend-scan] 'initialData' not found in HTML at all")
         return []
 
     try:
-        repos_raw = json.loads(match.group(1))
+        raw = match.group(1)
+        # 處理可能的雙重轉義
+        if '\\\"' in raw:
+            raw = raw.replace('\\"', '"')
+        repos_raw = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[trend-scan] JSON parse failed: {e}")
+        print(f"[trend-scan] raw snippet: {repr(raw[:300])}")
         return []
 
     repos = []
@@ -525,9 +536,8 @@ async def fetch_trendshift() -> list[dict]:
             "trendshift_url": f"https://trendshift.io/repositories/{r.get('repository_id', '')}",
         })
 
+    print(f"[trend-scan] Parsed {len(repos)} repos")
     return repos
-
-
 def _format_count(n: int | float | str) -> str:
     if isinstance(n, str):
         return n
