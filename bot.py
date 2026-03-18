@@ -497,8 +497,8 @@ async def fetch_trendshift() -> list[dict]:
 
     try:
         raw = match.group(1)
-        # 反轉義: \\" → " , \\\\ → \\
-        raw = raw.replace('\\"', '"').replace('\\\\', '\\')
+        raw = raw.replace('\\"', '"')
+        # 不要動 \\u → 讓 json.loads 自己處理 unicode escape
         repos_raw = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[trend-scan] JSON parse failed: {e}")
