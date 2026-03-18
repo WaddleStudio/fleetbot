@@ -2,6 +2,7 @@ import asyncio
 import httpx
 import re
 import json
+import codecs
 
 async def test():
     async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
@@ -17,16 +18,18 @@ async def test():
         re.DOTALL,
     )
 
-    if not match:
-        print("FAILED: no match")
-        return
-
     raw = match.group(1)
-    raw = raw.replace('\\"', '"').replace('\\\\', '\\')
-    repos = json.loads(raw)
+    # 一次性反轉義所有層級
+    raw = codecs.decode(raw, 'unicode_escape')
 
-    print(f"Parsed {len(repos)} repos:")
-    for r in repos[:5]:
-        print(f"  #{r['rank']} {r['full_name']} ⭐{r['repository_stars']} — {r.get('repository_description', '')[:60]}")
+    try:
+        repos = json.loads(raw)
+        print(f"OK: {len(repos)} repos")
+        for r in repos[:5]:
+            print(f"  #{r['rank']} {r['full_name']} ⭐{r['repository_stars']}")
+    except json.JSONDecodeError as e:
+        print(f"FAILED: {e}")
+        idx = e.pos
+        print(f"Around error: {repr(raw[max(0,idx-30):idx+30])}")
 
 asyncio.run(test())

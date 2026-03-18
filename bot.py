@@ -12,6 +12,7 @@ Commands:
   /trend-scan     — Scan today's GitHub trending repos for project relevance
 """
 
+import codecs
 import os
 import re
 import json
@@ -506,9 +507,7 @@ async def fetch_trendshift() -> list[dict]:
 
     try:
         raw = match.group(1)
-        # 處理可能的雙重轉義
-        if '\\\"' in raw:
-            raw = raw.replace('\\"', '"')
+        raw = codecs.decode(raw, 'unicode_escape')
         repos_raw = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[trend-scan] JSON parse failed: {e}")
