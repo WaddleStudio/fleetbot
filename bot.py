@@ -36,7 +36,6 @@ NOTION_DB_ID = os.getenv("NOTION_DB_ID")
 GUILD_ID = os.getenv("GUILD_ID")
 TECHTREND_CHANNEL_ID = os.getenv("TECHTREND_CHANNEL_ID")
 
-# Debug: show which vars are loaded (no values, just presence)
 print(f"ENV check: DISCORD_TOKEN={'✅' if DISCORD_TOKEN else '❌'} "
       f"NOTION_TOKEN={'✅' if NOTION_TOKEN else '❌'} "
       f"NOTION_DB_ID={'✅' if NOTION_DB_ID else '❌'} "
@@ -64,7 +63,6 @@ NB_CHOICES = [
     app_commands.Choice(name="NB4 — 商業化 & 產品", value="NB4"),
 ]
 
-# NB display mapping
 NB_LABELS = {
     "NB1": "📘 NB1 AI 模型 & 工具",
     "NB2": "📗 NB2 開發框架 & 語言",
@@ -77,7 +75,6 @@ NB_EMOJI = {"NB1": "📘", "NB2": "📗", "NB3": "📙", "NB4": "📕"}
 
 # ── Helpers ──────────────────────────────────────────────────
 def validate_url(url: str) -> bool:
-    """Basic URL validation."""
     pattern = re.compile(
         r"^https?://"
         r"(?:[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)$"
@@ -90,7 +87,6 @@ def now_tw() -> datetime:
 
 
 def week_start() -> datetime:
-    """Monday 00:00 of current week (UTC+8)."""
     today = now_tw().replace(hour=0, minute=0, second=0, microsecond=0)
     return today - timedelta(days=today.weekday())
 
@@ -101,7 +97,6 @@ def format_date_iso(dt: datetime) -> str:
 
 # ── Notion Operations ───────────────────────────────────────
 def notion_add_source(nb: str, url: str, note: str, project: str | None = None) -> dict:
-    """Create a new page in the Notion source tracking DB."""
     properties = {
         "URL": {"url": url},
         "Notebook": {"select": {"name": nb}},
@@ -119,7 +114,6 @@ def notion_add_source(nb: str, url: str, note: str, project: str | None = None) 
 
 
 def notion_query_sources(status: str = "pending", since: datetime | None = None) -> list:
-    """Query sources from Notion DB with optional date filter."""
     filters = [{"property": "Status", "select": {"equals": status}}]
 
     if since:
@@ -137,7 +131,6 @@ def notion_query_sources(status: str = "pending", since: datetime | None = None)
 
 
 def notion_update_status(page_id: str, status: str) -> dict:
-    """Update a source's status."""
     return notion.pages.update(
         page_id=page_id,
         properties={
@@ -148,7 +141,6 @@ def notion_update_status(page_id: str, status: str) -> dict:
 
 
 def extract_source_info(page: dict) -> dict:
-    """Extract readable info from a Notion page."""
     props = page["properties"]
     return {
         "id": page["id"],
@@ -169,7 +161,6 @@ def _get_rich_text(prop: dict) -> str:
 
 # ── NB Slash Commands ────────────────────────────────────────
 
-# /nb-add
 @tree.command(name="nb-add", description="記錄一個待新增到 NotebookLM 的來源 URL")
 @app_commands.describe(
     nb="目標 Notebook",
@@ -226,7 +217,6 @@ async def nb_add(
         await interaction.followup.send(f"❌ Notion 寫入失敗：```{e}```")
 
 
-# /nb-list
 @tree.command(name="nb-list", description="列出待新增的來源")
 @app_commands.describe(scope="顯示範圍")
 @app_commands.choices(scope=[
@@ -273,7 +263,6 @@ async def nb_list(
     await interaction.followup.send(msg)
 
 
-# /nb-done
 @tree.command(name="nb-done", description="標記來源已加入 NotebookLM")
 @app_commands.describe(source_id="來源 ID（前 8 碼，從 /nb-list 取得）")
 async def nb_done(interaction: discord.Interaction, source_id: str):
@@ -303,7 +292,6 @@ async def nb_done(interaction: discord.Interaction, source_id: str):
         await interaction.followup.send(f"❌ 更新失敗：```{e}```")
 
 
-# /nb-weekly-sync
 @tree.command(name="nb-weekly-sync", description="匯出本周來源清單為 Markdown（用於更新 URL txt 文件）")
 async def nb_weekly_sync(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -378,7 +366,6 @@ async def nb_weekly_sync(interaction: discord.Interaction):
         await interaction.followup.send(f"```md\n{md_content}\n```")
 
 
-# /nb-stats
 @tree.command(name="nb-stats", description="來源統計")
 async def nb_stats(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -419,7 +406,6 @@ async def nb_stats(interaction: discord.Interaction):
 
 # ── Trend Scan: Config ──────────────────────────────────────
 
-# Layer 1: 專案直接相關 (high priority)
 PROJECT_KEYWORDS: dict[str, list[str]] = {
     "CardSense": [
         "credit card", "payment", "fintech", "bank api", "stripe",
@@ -449,7 +435,6 @@ PROJECT_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
-# Layer 2: 技術棧相關 (medium priority)
 TECH_KEYWORDS: list[str] = [
     "typescript", "fastapi", "supabase", "railway", "vercel",
     "ollama", "qwen", "react native", "discord bot", "discord.js",
@@ -458,7 +443,6 @@ TECH_KEYWORDS: list[str] = [
     "shadcn", "unsloth", "lora", "qlora", "vllm",
 ]
 
-# 噪音過濾
 EXCLUDE_PATTERNS: list[str] = [
     r"awesome-",
     r"free-programming-books",
@@ -474,6 +458,7 @@ EXCLUDE_PATTERNS: list[str] = [
 
 # ── Trend Scan: Fetch ───────────────────────────────────────
 async def fetch_trendshift() -> list[dict]:
+    """Fetch trendshift.io and extract repo data from RSC initialData payload."""
     async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
         resp = await client.get(
             "https://trendshift.io/",
@@ -482,10 +467,6 @@ async def fetch_trendshift() -> list[dict]:
         resp.raise_for_status()
         html = resp.text
 
-    print(f"[trend-scan] HTML length: {len(html)}")
-    print(f"[trend-scan] 'initialData' in html: {'initialData' in html}")
-
-    # RSC payload 是雙重轉義的 JSON: \\" 而非 "
     match = re.search(
         r'\\"initialData\\":\s*(\[.*?\])\s*\}',
         html,
@@ -493,25 +474,15 @@ async def fetch_trendshift() -> list[dict]:
     )
 
     if not match:
-        print("[trend-scan] Could not find initialData")
-        return []
-
-    try:
-        raw = match.group(1)
-        raw = raw.replace('\\"', '"')
-        # 不要動 \\u → 讓 json.loads 自己處理 unicode escape
-        repos_raw = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"[trend-scan] JSON parse failed: {e}")
+        print("[trend-scan] Could not find initialData in page")
         return []
 
     try:
         raw = match.group(1)
         raw = codecs.decode(raw, 'unicode_escape')
         repos_raw = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"[trend-scan] JSON parse failed: {e}")
-        print(f"[trend-scan] raw snippet: {repr(raw[:300])}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"[trend-scan] Parse failed: {e}")
         return []
 
     repos = []
@@ -534,6 +505,8 @@ async def fetch_trendshift() -> list[dict]:
 
     print(f"[trend-scan] Parsed {len(repos)} repos")
     return repos
+
+
 def _format_count(n: int | float | str) -> str:
     if isinstance(n, str):
         return n
@@ -599,7 +572,6 @@ async def _run_trend_scan(keyword_filter: str | None = None) -> list[dict]:
     try:
         repos = await fetch_trendshift()
         if not repos:
-            print("[trend-scan] No repos parsed")
             return []
 
         results = []
@@ -657,7 +629,9 @@ async def trend_scan(
                 msg = msg[:1900] + "\n..."
             await interaction.followup.send(msg)
         except Exception as e:
-            await interaction.followup.send(f"❌ 取得失敗：```{e}```")
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(f"❌ 取得失敗：```{type(e).__name__}: {e}```")
         return
 
     results = await _run_trend_scan(keyword_filter=keyword)
@@ -697,7 +671,7 @@ async def daily_trend_scan():
 
     results = await _run_trend_scan()
     if not results:
-        return  # 無匹配 → 靜默
+        return
 
     high = [r for r in results if r["priority"] == "high"]
     medium = [r for r in results if r["priority"] == "medium"]
